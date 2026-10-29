@@ -93,32 +93,88 @@ class AndroidTermux:
             )
         print(f"[SENSOR] Accelerometer: {self.accel_name}")
         print(f"[SENSOR] Gyroscope: {self.gyro_name}")
+        # Lepaskan sensor yang mungkin masih "nyangkut" dari run sebelumnya.
+        try:
+            subprocess.run(["termux-sensor", "-c"], capture_output=True, timeout=10, check=False)
+        except (OSError, subprocess.TimeoutExpired):
+            pass
+        self.last_accel: tuple[float, float, float] | None = None
+        self.last_gyro: tuple[float, float, float] | None = None
+        self.failures = 0
+
+    @staticmethod
+    def _values(data: dict, sensor_name: str) -> tuple[float, float, float] | None:
+        """Ambil 3 sumbu untuk satu sensor; None kalau kosong/tidak ada."""
+        keys = [sensor_name] if sensor_name in data else [
+            key for key in data if sensor_name.lower() in key.lower() and "uncali" not in key.lower()]
+        for key in keys:
+            entry = data[key]
+            if isinstance(entry, dict):
+                values = entry.get("values") or []
+                if len(values) >= 3:
+                    return tuple(float(v) for v in values[:3])
+        return None
+
+    @staticmethod
+    def _call(sensors: str, count: int) -> str:
+        # Tanpa -d, Termux:API menunggu ~1000 ms per sampel; -d 100 -> ~100 ms.
+        try:
+            return subprocess.run(
+                ["termux-sensor", "-s", sensors, "-d", "100", "-n", str(count)],
+                capture_output=True, text=True, timeout=12, check=False,
+            ).stdout
+        except (OSError, subprocess.TimeoutExpired):
+            return ""
+
+    @staticmethod
+    def _parse_all(output: str) -> dict:
+        """Termux bisa mencetak beberapa objek JSON berurutan, dan tiap objek
+        kadang hanya berisi SATU sensor. Gabungkan semuanya."""
+        merged, decoder, index = {}, json.JSONDecoder(), 0
+        while True:
+            index = output.find("{", index)
+            if index == -1:
+                return merged
+            try:
+                obj, index = decoder.raw_decode(output, index)
+            except ValueError:
+                index += 1
+                continue
+            if isinstance(obj, dict):
+                for key, entry in obj.items():
+                    if isinstance(entry, dict) and len(entry.get("values") or []) >= 3:
+                        merged[key] = entry
 
     def read(self) -> SensorSample:
-        # Without -d, Termux:API waits ~1000 ms before each sample.
-        # -d 100 shortens it to ~100 ms so a brief pickup is not missed.
-        try:
-            output = subprocess.run(
-                [
-                    "termux-sensor", "-s", f"{self.accel_name},{self.gyro_name}",
-                    "-d", "100", "-n", "1",
-                ],
-                capture_output=True, text=True, timeout=12, check=True,
-            ).stdout
-        except (subprocess.CalledProcessError, subprocess.TimeoutExpired) as exc:
-            raise RuntimeError(
-                "Termux:API gagal membaca sensor. Uji: termux-sensor -l "
-                "dan termux-sensor -a -d 100 -n 1; cek instalasi/izin Termux:API."
-            ) from exc
-        try:
-            data = json.loads(output)
-            accel = tuple(float(v) for v in data[self.accel_name]["values"][:3])
-            gyro = tuple(float(v) for v in data[self.gyro_name]["values"][:3])
-            if len(accel) != 3 or len(gyro) != 3:
-                raise ValueError("Sensors must each provide three axes")
-            return SensorSample(time.monotonic(), accel, gyro)
-        except (ValueError, KeyError, TypeError) as exc:
-            raise RuntimeError(f"Cannot read Termux sensor output: {output[:300]}") from exc
+        """Satu pembacaan gagal TIDAK menghentikan program: pakai nilai terakhir."""
+        output = self._call(f"{self.accel_name},{self.gyro_name}", 3)
+        data = self._parse_all(output)
+        # Sensor yang tidak ikut terkirim -> baca sendiri-sendiri.
+        for name in (self.accel_name, self.gyro_name):
+            if self._values(data, name) is None:
+                data.update(self._parse_all(self._call(name, 1)))
+
+        accel = self._values(data, self.accel_name) or self.last_accel
+        gyro = self._values(data, self.gyro_name) or self.last_gyro
+        if accel is None or gyro is None:
+            self.failures += 1
+            if self.failures >= 20:
+                raise RuntimeError(
+                    "Sensor tidak pernah terbaca 20x berturut-turut. Coba: termux-sensor -c, "
+                    "lalu termux-sensor -s " f"{self.accel_name},{self.gyro_name} -n 1. "
+                    f"Output terakhir: {output[:300]!r}"
+                )
+            time.sleep(0.2)
+            return self.read()
+
+        if accel is self.last_accel or gyro is self.last_gyro:
+            self.failures += 1
+            if self.failures % 10 == 1:
+                print("[SENSOR] Satu pembacaan kosong, memakai nilai sebelumnya (aman)")
+        else:
+            self.failures = 0
+        self.last_accel, self.last_gyro = accel, gyro
+        return SensorSample(time.monotonic(), accel, gyro)
 
 
 def select_source(name: str, scenario: str) -> SensorSource:
