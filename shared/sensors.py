@@ -8,6 +8,7 @@ never needs to know which source generated the readings.
 """
 
 import json
+import os
 import math
 import random
 import shutil
@@ -71,17 +72,20 @@ class AndroidTermux:
             names = names.get("sensors", [])
         if not isinstance(names, list):
             raise RuntimeError("Unexpected sensor listing. Run termux-sensor -l and inspect the result")
-        self.accel_name = next(
-            (name for name in names if
-             ("accelerometer" in name.lower() or "acceleration sensor" in name.lower())
-             and "uncalibrated" not in name.lower()),
-            None,
-        )
-        self.gyro_name = next(
-            (name for name in names if "gyroscope" in name.lower()
-             and "uncalibrated" not in name.lower()),
-            None,
-        )
+        def find(keywords: tuple[str, ...]) -> str | None:
+            # Nama sensor beda-beda per merek HP, mis. "lsm6dso_acc" (Vivo),
+            # "BMI160 Accelerometer", "LSM6DSO Gyroscope". Lewati versi
+            # uncalibrated dan sensor turunan (linear acceleration).
+            for name in names:
+                lower = name.lower()
+                if "uncali" in lower or "linear" in lower:
+                    continue
+                if any(word in lower for word in keywords):
+                    return name
+            return None
+
+        self.accel_name = os.getenv("SENSOR_ACCEL") or find(("accelerometer", "acceleration sensor", "_acc"))
+        self.gyro_name = os.getenv("SENSOR_GYRO") or find(("gyroscope", "gyro"))
         if not self.accel_name or not self.gyro_name:
             raise RuntimeError(
                 f"Accelerometer + gyroscope belum terdeteksi. Daftar: {names}. "
