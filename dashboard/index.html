@@ -1,0 +1,136 @@
+<!doctype html>
+<html lang="id">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>WashAlert Dashboard</title>
+<script src="https://unpkg.com/mqtt@5.10.1/dist/mqtt.min.js"></script>
+<style>
+  :root { --bg:#f4f6f8; --card:#fff; --ink:#1d2733; --mute:#6b7785; --line:#e1e6eb;
+          --idle:#8a96a3; --wash:#2f80ed; --spin:#9b51e0; --done:#27ae60; --off:#c0392b; }
+  * { box-sizing:border-box; }
+  body { margin:0; font-family:system-ui,-apple-system,"Segoe UI",sans-serif; background:var(--bg); color:var(--ink); }
+  main { max-width:880px; margin:0 auto; padding:20px 16px 40px; }
+  h1 { font-size:22px; margin:0 0 4px; }
+  .sub { color:var(--mute); font-size:13px; margin-bottom:18px; }
+  .grid { display:grid; gap:14px; grid-template-columns:repeat(auto-fit,minmax(240px,1fr)); }
+  .card { background:var(--card); border:1px solid var(--line); border-radius:12px; padding:16px; }
+  .label { font-size:12px; color:var(--mute); text-transform:uppercase; letter-spacing:.04em; }
+  #status { font-size:34px; font-weight:700; margin:6px 0; }
+  #reason { color:var(--mute); font-size:14px; min-height:20px; }
+  .big { font-size:28px; font-weight:600; margin-top:6px; }
+  .steps { display:flex; gap:6px; margin-top:12px; }
+  .steps span { flex:1; text-align:center; padding:6px 0; border-radius:6px; font-size:12px; background:var(--bg); color:var(--mute); }
+  .steps span.on { color:#fff; }
+  canvas { width:100%; height:180px; display:block; }
+  .legend { font-size:12px; color:var(--mute); display:flex; gap:14px; margin-top:6px; }
+  .dot { display:inline-block; width:10px; height:3px; vertical-align:middle; margin-right:4px; }
+  #conn { font-size:12px; }
+  .wide { grid-column:1/-1; }
+  button { font:inherit; padding:8px 14px; border-radius:8px; border:1px solid var(--line); background:var(--card); cursor:pointer; }
+</style>
+</head>
+<body>
+<main>
+  <h1>WashAlert Dashboard</h1>
+  <div class="sub">Pemantau mesin cuci · <span id="project">-</span> · <span id="conn">menghubungkan...</span></div>
+
+  <div class="grid">
+    <div class="card">
+      <div class="label">Status mesin</div>
+      <div id="status">-</div>
+      <div id="reason"></div>
+      <div class="steps">
+        <span data-s="IDLE">IDLE</span><span data-s="WASHING">CUCI</span>
+        <span data-s="SPIN">SPIN</span><span data-s="DONE">SELESAI</span>
+      </div>
+    </div>
+    <div class="card">
+      <div class="label">Lama mesin bekerja</div>
+      <div class="big" id="minutes">0 menit</div>
+      <div class="label" style="margin-top:14px">RMS rata-rata (moving average)</div>
+      <div class="big" id="avg">0.000 m/s²</div>
+    </div>
+    <div class="card wide">
+      <div class="label">Getaran real-time (RMS per jendela)</div>
+      <canvas id="chart" width="840" height="180"></canvas>
+      <div class="legend">
+        <span><i class="dot" style="background:var(--wash)"></i>HP A (mesin)</span>
+        <span><i class="dot" style="background:var(--done)"></i>HP B (pemilik)</span>
+      </div>
+    </div>
+    <div class="card wide">
+      <div class="label">Kontrol pemilik</div>
+      <div style="display:flex;gap:8px;margin-top:8px">
+        <button onclick="send('ARM')">ARM (pantau)</button>
+        <button onclick="send('DISARM')">DISARM (jeda &amp; reset)</button>
+      </div>
+    </div>
+  </div>
+</main>
+<script>
+const COLORS = { IDLE:"--idle", WASHING:"--wash", SPIN:"--spin", DONE:"--done", OFFLINE:"--off", DISARMED:"--off" };
+const css = v => getComputedStyle(document.documentElement).getPropertyValue(v).trim();
+const series = { edge1: [], edge2: [] };
+const MAX = 60;
+let client, prefix;
+
+function setStatus(s) {
+  const el = document.getElementById("status");
+  el.textContent = s.status;
+  el.style.color = css(COLORS[s.status] || "--ink");
+  document.getElementById("reason").textContent = s.reason || "";
+  if (typeof s.run_minutes === "number") document.getElementById("minutes").textContent = s.run_minutes.toFixed(1) + " menit";
+  if (typeof s.avg_rms === "number") document.getElementById("avg").textContent = s.avg_rms.toFixed(3) + " m/s²";
+  document.querySelectorAll(".steps span").forEach(x => {
+    const on = x.dataset.s === s.status;
+    x.classList.toggle("on", on);
+    x.style.background = on ? css(COLORS[x.dataset.s]) : "";
+  });
+  if (s.status === "DONE" && navigator.vibrate) navigator.vibrate(300);
+}
+
+function draw() {
+  const c = document.getElementById("chart"), g = c.getContext("2d");
+  const all = [...series.edge1, ...series.edge2];
+  const top = Math.max(1, ...all) * 1.1;
+  g.clearRect(0, 0, c.width, c.height);
+  g.strokeStyle = css("--line"); g.lineWidth = 1;
+  for (let i = 1; i < 4; i++) { const y = c.height * i / 4; g.beginPath(); g.moveTo(0, y); g.lineTo(c.width, y); g.stroke(); }
+  g.fillStyle = css("--mute"); g.font = "11px system-ui";
+  g.fillText(top.toFixed(1) + " m/s²", 4, 12);
+  [["edge1", "--wash"], ["edge2", "--done"]].forEach(([k, col]) => {
+    const d = series[k]; if (d.length < 2) return;
+    g.strokeStyle = css(col); g.lineWidth = 2; g.beginPath();
+    d.forEach((v, i) => {
+      const x = c.width * i / (MAX - 1), y = c.height - (v / top) * c.height;
+      i ? g.lineTo(x, y) : g.moveTo(x, y);
+    });
+    g.stroke();
+  });
+}
+
+function send(cmd) { if (client && prefix) client.publish(prefix + "control", cmd, { qos: 1 }); }
+
+fetch("/config.json").then(r => r.json()).then(cfg => {
+  document.getElementById("project").textContent = cfg.project_id;
+  prefix = `washalert/${cfg.project_id}/`;
+  if (!cfg.websocket_url) { document.getElementById("conn").textContent = "MQTT_WS_URL belum diisi"; return; }
+  client = mqtt.connect(cfg.websocket_url, { clientId: "dash-" + Math.random().toString(16).slice(2, 10) });
+  client.on("connect", () => {
+    document.getElementById("conn").textContent = "terhubung ke broker";
+    client.subscribe([prefix + "status", prefix + "edge/+/telemetry"], { qos: 1 });
+  });
+  client.on("close", () => document.getElementById("conn").textContent = "terputus");
+  client.on("message", (topic, payload) => {
+    let data; try { data = JSON.parse(payload.toString()); } catch { return; }
+    if (topic.endsWith("/status")) return setStatus(data);
+    const k = data.device_id; if (!series[k]) return;
+    series[k].push(data.motion_rms); if (series[k].length > MAX) series[k].shift();
+    draw();
+  });
+}).catch(() => document.getElementById("conn").textContent = "gagal membaca config.json");
+draw();
+</script>
+</body>
+</html>
