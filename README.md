@@ -108,7 +108,7 @@ python hp_pemilik.py --source simulator    # HP B "digoyang" otomatis di detik k
 
 Simulator hanya untuk debugging, **tidak dihitung sebagai edge fisik**.
 
-## Skenario demo (video)
+## Skenario demo
 
 1. Kedua HP diam di meja → dashboard menampilkan `IDLE`.
 2. Geser-geser HP A pelan selama ±10 detik (seolah mesin mencuci) → `WASHING`.
@@ -135,5 +135,3 @@ Unit test mencakup:
 - penolakan pesan replay dan pesan basi (stale).
 
 ---
-
-Dikembangkan dari kerangka [myudak/contoh-project-iot1](https://github.com/myudak/contoh-project-iot1) (MIT License). Yang dipakai ulang: infrastruktur sensor, MQTT, dan processing edge. Yang baru: ide, algoritma, alarm, dan dashboard.
